@@ -1,0 +1,11 @@
+node_modules
+android
+ios
+assets
+.gradle
+build
+*.keystore
+*.jks
+*.p12
+*.mobileprovision
+capacitor.config.json

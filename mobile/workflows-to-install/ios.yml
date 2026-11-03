@@ -1,0 +1,167 @@
+name: iOS – ticketing app + gate scanner
+
+# Builds two separate iOS apps from /mobile (Capacitor shells around the live website):
+#   tickets → "Nordic Affairs"   (events, booking, My bookings, e-tickets)
+#   gate    → "NAM Gate Scanner" (staff sign-in, camera QR scanner, live check-in counter)
+# Without Apple secrets it only compiles for the iOS Simulator (proves the project builds).
+# With the ASC_* secrets it signs, exports an .ipa and can upload it to TestFlight.
+
+on:
+  push:
+    branches: [main]
+    tags: ['mobile-v*']
+    paths: ['mobile/**', 'apps/web/public/icons/**', '.github/workflows/ios.yml']
+  pull_request:
+    paths: ['mobile/**', 'apps/web/public/icons/**', '.github/workflows/ios.yml']
+  workflow_dispatch:
+    inputs:
+      app:
+        description: Which app to build
+        type: choice
+        options: [both, tickets, gate]
+        default: both
+      upload_testflight:
+        description: Upload the signed .ipa to TestFlight
+        type: boolean
+        default: false
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.app }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [tickets, gate]
+    env:
+      APP_VARIANT: ${{ matrix.app }}
+      SITE_URL: ${{ vars.SITE_URL || 'https://nordicaffairsmedia.com' }}
+      BUNDLE_ID_BASE: ${{ vars.BUNDLE_ID_BASE || 'com.nordicaffairs.media' }}
+      VERSION_NAME: ${{ vars.APP_VERSION || '1.0.0' }}
+      BUILD_NUMBER: ${{ github.run_number }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - name: Skip apps that were not asked for
+        id: want
+        run: |
+          pick="${{ github.event.inputs.app || 'both' }}"
+          if [ "$pick" = both ] || [ "$pick" = "${{ matrix.app }}" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; else echo "run=false" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/checkout@v4
+        if: steps.want.outputs.run == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.want.outputs.run == 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        if: steps.want.outputs.run == 'true'
+        with:
+          xcode-version: latest-stable
+
+      - name: Install, generate icons and the iOS project
+        if: steps.want.outputs.run == 'true'
+        working-directory: mobile
+        run: |
+          npm ci
+          npm run prepare:assets
+          node scripts/native.mjs add ios
+          node scripts/native.mjs configure ios
+
+      - name: Check which kind of build this is
+        if: steps.want.outputs.run == 'true'
+        id: mode
+        run: |
+          if [ -n "$ASC_KEY_ID" ] && [ -n "$ASC_ISSUER_ID" ] && [ -n "$ASC_KEY_P8" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Apple secrets not set – compiling for the iOS Simulator only."
+          fi
+
+      # ---- No secrets: prove the project compiles -------------------------------------------
+      - name: Build for iOS Simulator
+        if: steps.want.outputs.run == 'true' && steps.mode.outputs.signed != 'true'
+        working-directory: mobile/ios/App
+        run: |
+          xcodebuild build \
+            -project App.xcodeproj -scheme App -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            MARKETING_VERSION="$VERSION_NAME" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            CODE_SIGNING_ALLOWED=NO
+          cd "$RUNNER_TEMP/dd/Build/Products/Debug-iphonesimulator" && zip -qry "$RUNNER_TEMP/App-simulator.zip" App.app
+
+      - name: Upload simulator build
+        if: steps.want.outputs.run == 'true' && steps.mode.outputs.signed != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-${{ matrix.app }}-simulator-${{ github.run_number }}
+          path: ${{ runner.temp }}/App-simulator.zip
+
+      # ---- With secrets: archive, sign (Xcode cloud signing via the API key), export .ipa -----
+      - name: Archive and export .ipa
+        if: steps.want.outputs.run == 'true' && steps.mode.outputs.signed == 'true'
+        working-directory: mobile/ios/App
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          KEY="$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          printf '%s' "$ASC_KEY_P8" > "$KEY"
+          AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$KEY" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+
+          xcodebuild archive \
+            -project App.xcodeproj -scheme App -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Automatic \
+            MARKETING_VERSION="$VERSION_NAME" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            "${AUTH[@]}"
+
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>destination</key><string>export</string>
+          </dict></plist>
+          PLIST
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export" "${AUTH[@]}"
+          ls -la "$RUNNER_TEMP/export"
+
+      - name: Upload .ipa
+        if: steps.want.outputs.run == 'true' && steps.mode.outputs.signed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-${{ matrix.app }}-ipa-${{ github.run_number }}
+          if-no-files-found: error
+          path: ${{ runner.temp }}/export/*.ipa
+
+      - name: Upload to TestFlight
+        if: >-
+          steps.want.outputs.run == 'true' && steps.mode.outputs.signed == 'true' &&
+          (github.event.inputs.upload_testflight == 'true' || startsWith(github.ref, 'refs/tags/mobile-v'))
+        uses: apple-actions/upload-testflight-build@v3
+        with:
+          app-path: ${{ runner.temp }}/export/App.ipa
+          issuer-id: ${{ secrets.ASC_ISSUER_ID }}
+          api-key-id: ${{ secrets.ASC_KEY_ID }}
+          api-private-key: ${{ secrets.ASC_KEY_P8 }}

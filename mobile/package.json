@@ -1,0 +1,27 @@
+{
+  "name": "@nam/mobile",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Android + iOS shells for Nordic Affairs Media: the ticketing app (APP_VARIANT=tickets) and the gate scanner (APP_VARIANT=gate). Not part of the npm workspaces on purpose.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prepare:assets": "node scripts/prepare-assets.mjs",
+    "native:add": "node scripts/native.mjs add",
+    "native:configure": "node scripts/native.mjs configure",
+    "native:sync": "cap sync",
+    "write:config": "node scripts/write-config.mjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/core": "^8.6.0",
+    "@capacitor/ios": "^8.6.0"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^4.0.0",
+    "@capacitor/cli": "^8.6.0",
+    "sharp": "^0.34.3"
+  }
+}
