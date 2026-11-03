@@ -3,7 +3,7 @@ name: iOS – ticketing app + gate scanner
 # Builds two separate iOS apps from /mobile (Capacitor shells around the live website):
 #   tickets → "Nordic Affairs"   (events, booking, My bookings, e-tickets)
 #   gate    → "NAM Gate Scanner" (staff sign-in, camera QR scanner, live check-in counter)
-# Without Apple secrets it only compiles for the iOS Simulator (proves the project builds).
+# Without Apple secrets it builds an UNSIGNED .ipa you can sideload with Sideloadly / AltStore.
 # With the ASC_* secrets it signs, exports an .ipa and can upload it to TestFlight.
 
 on:
@@ -90,28 +90,31 @@ jobs:
             echo "signed=true" >> "$GITHUB_OUTPUT"
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Apple secrets not set – compiling for the iOS Simulator only."
+            echo "::notice::Apple secrets not set – building an unsigned .ipa for sideloading."
           fi
 
-      # ---- No secrets: prove the project compiles -------------------------------------------
-      - name: Build for iOS Simulator
+      # ---- No secrets: build an UNSIGNED .ipa (install it with Sideloadly / AltStore) -----------
+      - name: Build unsigned .ipa for sideloading
         if: steps.want.outputs.run == 'true' && steps.mode.outputs.signed != 'true'
         working-directory: mobile/ios/App
         run: |
           xcodebuild build \
-            -project App.xcodeproj -scheme App -configuration Debug \
-            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -project App.xcodeproj -scheme App -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
             -derivedDataPath "$RUNNER_TEMP/dd" \
             MARKETING_VERSION="$VERSION_NAME" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
-            CODE_SIGNING_ALLOWED=NO
-          cd "$RUNNER_TEMP/dd/Build/Products/Debug-iphonesimulator" && zip -qry "$RUNNER_TEMP/App-simulator.zip" App.app
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+          mkdir -p "$RUNNER_TEMP/pkg/Payload"
+          cp -R "$RUNNER_TEMP/dd/Build/Products/Release-iphoneos/App.app" "$RUNNER_TEMP/pkg/Payload/"
+          cd "$RUNNER_TEMP/pkg" && zip -qry "$RUNNER_TEMP/${APP_VARIANT}-unsigned.ipa" Payload
+          ls -la "$RUNNER_TEMP"/*.ipa
 
-      - name: Upload simulator build
+      - name: Upload unsigned .ipa
         if: steps.want.outputs.run == 'true' && steps.mode.outputs.signed != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: ios-${{ matrix.app }}-simulator-${{ github.run_number }}
-          path: ${{ runner.temp }}/App-simulator.zip
+          name: ios-${{ matrix.app }}-unsigned-ipa-${{ github.run_number }}
+          path: ${{ runner.temp }}/${{ matrix.app }}-unsigned.ipa
 
       # ---- With secrets: archive, sign (Xcode cloud signing via the API key), export .ipa -----
       - name: Archive and export .ipa
